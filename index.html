@@ -58,6 +58,7 @@
     <div class="control-buttons"><button class="btn icon-btn" id="search-toggle" type="button" aria-label="ค้นหาหรือเปลี่ยนพื้นที่" aria-expanded="false" aria-controls="search-box"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg></button><button class="btn icon-btn" id="gps-btn" type="button" aria-label="อัปเดตตำแหน่ง GPS"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6"/><path d="M12 2v5m0 10v5M2 12h5m10 0h5"/></svg></button><button class="btn icon-btn" id="refresh-btn" type="button" aria-label="รีเฟรชข้อมูล"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6M20 4v7h-7"/></svg></button></div>
   </section>
   <section class="search-box" id="search-box" aria-label="ค้นหาพื้นที่"><form class="search-row" id="search-form"><input id="search-input" type="search" placeholder="ชื่อเมือง เช่น Bangkok" autocomplete="off" aria-label="ค้นหาชื่อพื้นที่" minlength="2" required/><button class="btn primary" id="search-submit" type="submit">ค้นหา</button></form><div class="quick-places" id="quick-places"><button class="chip" type="button" data-city="bangkok">กรุงเทพฯ</button><button class="chip" type="button" data-city="sriracha">ศรีราชา</button><button class="chip" type="button" data-city="chaam">ชะอำ</button><button class="chip" type="button" data-city="chiangrai">เชียงราย</button></div><div class="results" id="search-results" aria-live="polite"></div><p class="hint">GPS ต้องได้รับอนุญาตและใช้ HTTPS</p></section>
+  <p class="hint">เวลาในข้อมูลอ้างอิงเขตเวลาของพื้นที่ · สำหรับประเทศไทยใช้ UTC+7 (รหัส Asia/Bangkok) ไม่ใช่ตำแหน่ง GPS ว่าอยู่กรุงเทพฯ</p>
   <p id="location-status" class="location-line" role="status" aria-live="polite">กำลังขอตำแหน่งปัจจุบัน</p>
   <div id="message" class="message" role="status" aria-live="polite">กำลังโหลดข้อมูล…</div>
   <main id="app-content" tabindex="-1">
@@ -210,7 +211,7 @@
   const samePlace=(a,b)=>a&&b&&val(a.lat)&&val(a.lon)&&Math.abs(a.lat-b.lat)<.001&&Math.abs(a.lon-b.lon)<.001;
   const referenceEpoch=d=>validTime(d?.current?.time)&&val(d.utc_offset_seconds)?Date.parse(d.current.time+'Z')-d.utc_offset_seconds*1000:NaN;
   const ageText=at=>val(at)&&at>0?'รับข้อมูลเมื่อ '+Math.max(0,Math.floor((Date.now()-at)/60000))+' นาทีที่แล้ว':'ไม่ทราบเวลาที่รับข้อมูล';
-  const zone=d=>typeof d.timezone==='string'?d.timezone:'ไม่ทราบเขตเวลา';
+  const zone=d=>d?.timezone==='Asia/Bangkok'?'เขตเวลาประเทศไทย (UTC+7)':typeof d?.timezone==='string'?'เขตเวลา '+d.timezone:'ไม่ทราบเขตเวลา';
   const timeLabel=d=>(d.current.time.replace('T',' ')+' · '+zone(d));
   const oldReference=d=>Number.isFinite(referenceEpoch(d))&&Date.now()-referenceEpoch(d)>2*60*60*1000;
   function validModel(d){return !!(d&&validTime(d.current?.time)&&d.hourly&&d.daily&&Array.isArray(d.hourly.time)&&d.hourly.time.length>=24&&d.hourly.time.every(validTime)&&Array.isArray(d.daily.time)&&d.daily.time.length&&d.daily.time.every(t=>typeof t==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(t)))}
@@ -317,6 +318,15 @@
     $('location-status').textContent=place.source==='gps'?'ใช้พิกัดปัจจุบันจาก GPS'+(val(p.accuracy)?' · ความแม่นยำตำแหน่งประมาณ ±'+num(p.accuracy)+' เมตร':''):'ใช้พื้นที่ที่เลือกเอง · เปิดแอปครั้งถัดไปจะขอ GPS ใหม่';
     $('search-box').classList.remove('show');$('search-toggle').setAttribute('aria-expanded','false');$('search-results').replaceChildren();loadAll();
   }
+  function gpsAreaName(data){
+    // Prefer administrative boundaries to the provider's nearest-city label.
+    const admin=Array.isArray(data.localityInfo?.administrative)?data.localityInfo.administrative:[];
+    const areas=admin.filter(a=>a&&typeof a.name==='string'&&a.name.trim()&&Number.isFinite(a.adminLevel)&&a.adminLevel>=4)
+      .sort((a,b)=>b.adminLevel-a.adminLevel);
+    const local=areas.filter(a=>a.adminLevel>4).slice(0,2).map(a=>a.name);
+    const parts=[...(local.length?local:[data.locality||data.city]),data.principalSubdivision||areas.find(a=>a.adminLevel===4)?.name,data.countryName];
+    return [...new Set(parts.filter(v=>typeof v==='string'&&v.trim()).map(v=>v.trim()))].join(' · ');
+  }
   async function resolveGPSName(point,request){
     const ctl=new AbortController();placeNameController=ctl;
     const active=()=>request===locationRequestId&&place.source==='gps'&&place.lat===point.lat&&place.lon===point.lon;
@@ -328,8 +338,7 @@
       const response=await fetch('https://api.bigdatacloud.net/data/reverse-geocode-client?'+params,{signal:ctl.signal});
       if(!response.ok)throw Error('HTTP '+response.status);
       const data=await response.json();if(!active())return;
-      const parts=[data.locality||data.city,data.principalSubdivision,data.countryName].filter(v=>typeof v==='string'&&v.trim()).map(v=>v.trim());
-      const name=[...new Set(parts)].join(' · ');if(!name)throw Error('No locality');
+      const name=gpsAreaName(data);if(!name)throw Error('No locality');
       place={...place,name};safeSet(STORAGE_LOC,place);updatePlace();
       if($('rain-history').open)renderHistory();
       $('location-status').textContent=base+' · ชื่อพื้นที่โดย BigDataCloud (พื้นที่โดยประมาณ)';
@@ -442,7 +451,7 @@
   function dashboardDate(){
     const tz=typeof model?.timezone==='string'?model.timezone:Intl.DateTimeFormat().resolvedOptions().timeZone;
     try{const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'}),parts=Object.fromEntries(formatter.formatToParts(new Date()).map(part=>[part.type,part.value]));
-      return {date:parts.year+'-'+parts.month+'-'+parts.day,label:new Intl.DateTimeFormat('th-TH-u-ca-gregory',{timeZone:tz,weekday:'short',day:'numeric',month:'short',year:'numeric'}).format(new Date())+' · '+tz};
+      return {date:parts.year+'-'+parts.month+'-'+parts.day,label:new Intl.DateTimeFormat('th-TH-u-ca-gregory',{timeZone:tz,weekday:'short',day:'numeric',month:'short',year:'numeric'}).format(new Date())+' · '+zone({timezone:tz})};
     }catch{const date=new Date(Date.now()+(val(model?.utc_offset_seconds)?model.utc_offset_seconds:0)*1000).toISOString().slice(0,10);return {date,label:date+' · '+zone(model||{})}}
   }
   function renderDashboard(){
